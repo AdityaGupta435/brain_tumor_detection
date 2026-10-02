@@ -6,7 +6,7 @@ from PIL import Image
 
 
 # -----------------------------
-# Page Configuration
+# Page
 # -----------------------------
 
 st.set_page_config(
@@ -15,11 +15,11 @@ st.set_page_config(
 )
 
 st.title("🧠 Brain Tumor Classifier")
-st.write("Upload a brain MRI image to classify it.")
+st.write("Upload a brain MRI image for classification.")
 
 
 # -----------------------------
-# Model Architecture
+# Normal Model Architecture
 # -----------------------------
 
 class SimpleCNN(nn.Module):
@@ -28,11 +28,11 @@ class SimpleCNN(nn.Module):
         super(SimpleCNN, self).__init__()
 
         self.features = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.Conv2d(3, 16, 3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
 
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(16, 32, 3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2, 2)
         )
@@ -43,6 +43,49 @@ class SimpleCNN(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+# -----------------------------
+# Quantized Model Architecture
+# -----------------------------
+
+class QuantizedCNN(nn.Module):
+
+    def __init__(self, num_classes=4):
+        super(QuantizedCNN, self).__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(16, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+
+            nn.quantized.dynamic.Linear(
+                32 * 62 * 62,
+                128
+            ),
+
+            nn.ReLU(),
+
+            nn.Dropout(0.5),
+
+            nn.quantized.dynamic.Linear(
+                128,
+                num_classes
+            )
         )
 
     def forward(self, x):
@@ -67,54 +110,48 @@ class_names = [
 # Device
 # -----------------------------
 
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+device = torch.device("cpu")
 
 
 # -----------------------------
-# Load Model
+# Load Quantized Model
 # -----------------------------
 
 @st.cache_resource
 def load_model():
 
-    model = SimpleCNN(num_classes=4)
+    model = QuantizedCNN(num_classes=4)
 
     checkpoint = torch.load(
         "model.pth",
-        map_location=device
+        map_location="cpu",
+        weights_only=False
     )
 
-    if isinstance(checkpoint, dict):
+    if "model_state_dict" in checkpoint:
+        checkpoint = checkpoint["model_state_dict"]
 
-        if "model_state_dict" in checkpoint:
-            checkpoint = checkpoint["model_state_dict"]
+    checkpoint = {
+        key.replace("module.", ""): value
+        for key, value in checkpoint.items()
+    }
 
-        # Remove module. if model was trained using DataParallel
-        checkpoint = {
-            key.replace("module.", ""): value
-            for key, value in checkpoint.items()
-        }
+    model.load_state_dict(checkpoint)
 
-        model.load_state_dict(checkpoint)
-
-    else:
-        model = checkpoint
-
-    model.to(device)
     model.eval()
 
     return model
 
 
 # -----------------------------
-# Image Preprocessing
+# Image Transformation
 # -----------------------------
 
 transform = transforms.Compose([
     transforms.Resize((250, 250)),
+
     transforms.ToTensor(),
+
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
@@ -127,7 +164,7 @@ transform = transforms.Compose([
 # -----------------------------
 
 uploaded_file = st.file_uploader(
-    "Choose an MRI image",
+    "Upload MRI Image",
     type=["jpg", "jpeg", "png"]
 )
 
@@ -144,7 +181,7 @@ if uploaded_file is not None:
 
     st.image(
         image,
-        caption="Uploaded MRI Image",
+        caption="Uploaded MRI",
         width=400
     )
 
@@ -154,15 +191,12 @@ if uploaded_file is not None:
 
             model = load_model()
 
-            # Preprocess image
             image_tensor = transform(image)
 
-            # Add batch dimension
             image_tensor = image_tensor.unsqueeze(0)
 
             image_tensor = image_tensor.to(device)
 
-            # Prediction
             with torch.no_grad():
 
                 output = model(image_tensor)
@@ -178,20 +212,24 @@ if uploaded_file is not None:
                 )
 
             predicted_class = predicted_class.item()
+
             confidence = confidence.item()
 
             result = class_names[predicted_class]
 
-            # Display result
             st.success(
-                f"Prediction: {result.replace('_', ' ').title()}"
+                f"Prediction: "
+                f"{result.replace('_', ' ').title()}"
             )
 
             st.write(
                 f"Confidence: {confidence * 100:.2f}%"
             )
 
-            # All probabilities
+            # -----------------------------
+            # Probabilities
+            # -----------------------------
+
             st.subheader("Class Probabilities")
 
             for i, class_name in enumerate(class_names):
@@ -207,25 +245,36 @@ if uploaded_file is not None:
 
         except Exception as e:
 
-            st.error("Error while loading model or predicting.")
+            st.error(
+                "Prediction failed."
+            )
 
             st.exception(e)
 
 
 # -----------------------------
-# Information
+# Sidebar
 # -----------------------------
 
-st.sidebar.header("Model Information")
+st.sidebar.title("Model Information")
 
-st.sidebar.write("Architecture: SimpleCNN")
-st.sidebar.write("Input Size: 250 × 250")
-st.sidebar.write("Classes: 4")
-st.sidebar.write(f"Device: {device}")
+st.sidebar.write(
+    "Architecture: Quantized SimpleCNN"
+)
 
-st.sidebar.write("")
+st.sidebar.write(
+    "Input: 250 × 250"
+)
+
+st.sidebar.write(
+    "Classes: 4"
+)
+
+st.sidebar.write(
+    "Device: CPU"
+)
 
 st.sidebar.warning(
-    "This application is for educational purposes only "
-    "and should not be used for medical diagnosis."
+    "This application is for educational purposes "
+    "and is not a medical diagnosis system."
 )
