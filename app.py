@@ -5,9 +5,9 @@ from torchvision import transforms
 from PIL import Image
 
 
-# -----------------------------
-# Page
-# -----------------------------
+# =====================================================
+# PAGE
+# =====================================================
 
 st.set_page_config(
     page_title="Brain Tumor Classifier",
@@ -15,65 +15,55 @@ st.set_page_config(
 )
 
 st.title("🧠 Brain Tumor Classifier")
-st.write("Upload a brain MRI image for classification.")
+st.write("Upload a brain MRI image to classify it.")
 
 
-# -----------------------------
-# Normal Model Architecture
-# -----------------------------
+# =====================================================
+# MODEL
+# =====================================================
 
 class SimpleCNN(nn.Module):
 
     def __init__(self, num_classes=4):
+
         super(SimpleCNN, self).__init__()
 
         self.features = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
 
-            nn.Conv2d(16, 32, 3, padding=1),
+            nn.Conv2d(
+                3,
+                16,
+                kernel_size=3,
+                padding=1
+            ),
+
             nn.ReLU(),
-            nn.MaxPool2d(2, 2)
+
+            nn.MaxPool2d(
+                kernel_size=2,
+                stride=2
+            ),
+
+            nn.Conv2d(
+                16,
+                32,
+                kernel_size=3,
+                padding=1
+            ),
+
+            nn.ReLU(),
+
+            nn.MaxPool2d(
+                kernel_size=2,
+                stride=2
+            )
         )
 
         self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(32 * 62 * 62, 128),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(128, num_classes)
-        )
 
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
-
-
-# -----------------------------
-# Quantized Model Architecture
-# -----------------------------
-
-class QuantizedCNN(nn.Module):
-
-    def __init__(self, num_classes=4):
-        super(QuantizedCNN, self).__init__()
-
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-
-            nn.Conv2d(16, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2)
-        )
-
-        self.classifier = nn.Sequential(
             nn.Flatten(),
 
-            nn.quantized.dynamic.Linear(
+            nn.Linear(
                 32 * 62 * 62,
                 128
             ),
@@ -82,21 +72,24 @@ class QuantizedCNN(nn.Module):
 
             nn.Dropout(0.5),
 
-            nn.quantized.dynamic.Linear(
+            nn.Linear(
                 128,
                 num_classes
             )
         )
 
     def forward(self, x):
+
         x = self.features(x)
+
         x = self.classifier(x)
+
         return x
 
 
-# -----------------------------
-# Classes
-# -----------------------------
+# =====================================================
+# CLASS NAMES
+# =====================================================
 
 class_names = [
     "glioma_tumor",
@@ -106,72 +99,117 @@ class_names = [
 ]
 
 
-# -----------------------------
-# Device
-# -----------------------------
+# =====================================================
+# DEVICE
+# =====================================================
 
 device = torch.device("cpu")
 
 
-# -----------------------------
-# Load Quantized Model
-# -----------------------------
+# =====================================================
+# LOAD QUANTIZED MODEL
+# =====================================================
 
 @st.cache_resource
 def load_model():
 
-    model = QuantizedCNN(num_classes=4)
+    # Create original float model
+    model = SimpleCNN(num_classes=4)
 
+    # Convert Linear layers to dynamic quantized Linear
+    quantized_model = torch.quantization.quantize_dynamic(
+        model,
+        {nn.Linear},
+        dtype=torch.qint8
+    )
+
+    # Load saved quantized state_dict
     checkpoint = torch.load(
         "model.pth",
         map_location="cpu",
         weights_only=False
     )
 
-    if "model_state_dict" in checkpoint:
-        checkpoint = checkpoint["model_state_dict"]
+    # If checkpoint contains model_state_dict
+    if isinstance(checkpoint, dict):
 
-    checkpoint = {
-        key.replace("module.", ""): value
-        for key, value in checkpoint.items()
-    }
+        if "model_state_dict" in checkpoint:
 
-    model.load_state_dict(checkpoint)
+            checkpoint = checkpoint["model_state_dict"]
 
-    model.eval()
+    # Remove DataParallel prefix if present
+    cleaned_checkpoint = {}
 
-    return model
+    for key, value in checkpoint.items():
+
+        new_key = key
+
+        if new_key.startswith("module."):
+
+            new_key = new_key.replace(
+                "module.",
+                "",
+                1
+            )
+
+        cleaned_checkpoint[new_key] = value
+
+    # Load quantized weights
+    quantized_model.load_state_dict(
+        cleaned_checkpoint,
+        strict=True
+    )
+
+    quantized_model.eval()
+
+    return quantized_model
 
 
-# -----------------------------
-# Image Transformation
-# -----------------------------
+# =====================================================
+# IMAGE TRANSFORMATION
+# =====================================================
 
 transform = transforms.Compose([
-    transforms.Resize((250, 250)),
+
+    transforms.Resize(
+        (250, 250)
+    ),
 
     transforms.ToTensor(),
 
     transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
+        mean=[
+            0.485,
+            0.456,
+            0.406
+        ],
+
+        std=[
+            0.229,
+            0.224,
+            0.225
+        ]
     )
 ])
 
 
-# -----------------------------
-# Upload Image
-# -----------------------------
+# =====================================================
+# IMAGE UPLOAD
+# =====================================================
 
 uploaded_file = st.file_uploader(
     "Upload MRI Image",
-    type=["jpg", "jpeg", "png"]
+    type=[
+        "jpg",
+        "jpeg",
+        "png"
+    ]
 )
 
 
-# -----------------------------
-# Prediction
-# -----------------------------
+# =====================================================
+# PREDICTION
+# =====================================================
 
 if uploaded_file is not None:
 
@@ -181,7 +219,7 @@ if uploaded_file is not None:
 
     st.image(
         image,
-        caption="Uploaded MRI",
+        caption="Uploaded MRI Image",
         width=400
     )
 
@@ -189,17 +227,24 @@ if uploaded_file is not None:
 
         try:
 
+            # Load model
             model = load_model()
 
+            # Transform image
             image_tensor = transform(image)
 
+            # Add batch dimension
             image_tensor = image_tensor.unsqueeze(0)
 
+            # CPU
             image_tensor = image_tensor.to(device)
 
+            # Prediction
             with torch.no_grad():
 
-                output = model(image_tensor)
+                output = model(
+                    image_tensor
+                )
 
                 probabilities = torch.softmax(
                     output,
@@ -215,33 +260,48 @@ if uploaded_file is not None:
 
             confidence = confidence.item()
 
-            result = class_names[predicted_class]
+            result = class_names[
+                predicted_class
+            ]
 
+            # Result
             st.success(
-                f"Prediction: "
-                f"{result.replace('_', ' ').title()}"
+                "Prediction: "
+                + result.replace(
+                    "_",
+                    " "
+                ).title()
             )
 
             st.write(
-                f"Confidence: {confidence * 100:.2f}%"
+                f"Confidence: "
+                f"{confidence * 100:.2f}%"
             )
 
-            # -----------------------------
-            # Probabilities
-            # -----------------------------
+            # -----------------------------------------
+            # ALL CLASS PROBABILITIES
+            # -----------------------------------------
 
-            st.subheader("Class Probabilities")
+            st.subheader(
+                "Class Probabilities"
+            )
 
-            for i, class_name in enumerate(class_names):
+            for i, class_name in enumerate(
+                class_names
+            ):
 
-                probability = probabilities[0][i].item()
+                probability = probabilities[
+                    0
+                ][i].item()
 
                 st.write(
                     f"{class_name.replace('_', ' ').title()}: "
                     f"{probability * 100:.2f}%"
                 )
 
-                st.progress(probability)
+                st.progress(
+                    probability
+                )
 
         except Exception as e:
 
@@ -252,18 +312,24 @@ if uploaded_file is not None:
             st.exception(e)
 
 
-# -----------------------------
-# Sidebar
-# -----------------------------
+# =====================================================
+# SIDEBAR
+# =====================================================
 
-st.sidebar.title("Model Information")
-
-st.sidebar.write(
-    "Architecture: Quantized SimpleCNN"
+st.sidebar.title(
+    "Model Information"
 )
 
 st.sidebar.write(
-    "Input: 250 × 250"
+    "Architecture: SimpleCNN"
+)
+
+st.sidebar.write(
+    "Quantization: Dynamic INT8"
+)
+
+st.sidebar.write(
+    "Input Size: 250 × 250"
 )
 
 st.sidebar.write(
@@ -275,6 +341,7 @@ st.sidebar.write(
 )
 
 st.sidebar.warning(
-    "This application is for educational purposes "
-    "and is not a medical diagnosis system."
+    "This application is for educational "
+    "purposes only and is not a medical "
+    "diagnosis system."
 )
