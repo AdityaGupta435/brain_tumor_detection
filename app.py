@@ -1,95 +1,25 @@
 import streamlit as st
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms
 from PIL import Image
 
 
-# =====================================================
-# PAGE
-# =====================================================
+# --------------------------------------------------
+# Page Configuration
+# --------------------------------------------------
 
 st.set_page_config(
     page_title="Brain Tumor Classifier",
-    page_icon="🧠"
+    page_icon="🧠",
+    layout="centered"
 )
 
-st.title("🧠 Brain Tumor Classifier")
-st.write("Upload a brain MRI image to classify it.")
 
-
-# =====================================================
-# MODEL
-# =====================================================
-
-class SimpleCNN(nn.Module):
-
-    def __init__(self, num_classes=4):
-
-        super(SimpleCNN, self).__init__()
-
-        self.features = nn.Sequential(
-
-            nn.Conv2d(
-                3,
-                16,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.ReLU(),
-
-            nn.MaxPool2d(
-                kernel_size=2,
-                stride=2
-            ),
-
-            nn.Conv2d(
-                16,
-                32,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.ReLU(),
-
-            nn.MaxPool2d(
-                kernel_size=2,
-                stride=2
-            )
-        )
-
-        self.classifier = nn.Sequential(
-
-            nn.Flatten(),
-
-            nn.Linear(
-                32 * 62 * 62,
-                128
-            ),
-
-            nn.ReLU(),
-
-            nn.Dropout(0.5),
-
-            nn.Linear(
-                128,
-                num_classes
-            )
-        )
-
-    def forward(self, x):
-
-        x = self.features(x)
-
-        x = self.classifier(x)
-
-        return x
-
-
-# =====================================================
-# CLASS NAMES
-# =====================================================
+# --------------------------------------------------
+# Class Names
+# --------------------------------------------------
 
 class_names = [
     "glioma_tumor",
@@ -99,249 +29,266 @@ class_names = [
 ]
 
 
-# =====================================================
-# DEVICE
-# =====================================================
+# --------------------------------------------------
+# Compatible Model
+# --------------------------------------------------
 
-device = torch.device("cpu")
+class CompatibleCNN(nn.Module):
+
+    def __init__(self, state_dict):
+        super().__init__()
+
+        # Convolution layers
+        self.register_buffer(
+            "conv1_weight",
+            state_dict["features.0.weight"]
+        )
+
+        self.register_buffer(
+            "conv1_bias",
+            state_dict["features.0.bias"]
+        )
+
+        self.register_buffer(
+            "conv2_weight",
+            state_dict["features.3.weight"]
+        )
+
+        self.register_buffer(
+            "conv2_bias",
+            state_dict["features.3.bias"]
+        )
+
+        # Quantized Linear 1
+        linear1_params = state_dict[
+            "classifier.1._packed_params._packed_params"
+        ]
+
+        self.register_buffer(
+            "linear1_weight",
+            linear1_params[0]
+        )
+
+        self.register_buffer(
+            "linear1_bias",
+            linear1_params[1]
+        )
+
+        # Quantized Linear 2
+        linear2_params = state_dict[
+            "classifier.4._packed_params._packed_params"
+        ]
+
+        self.register_buffer(
+            "linear2_weight",
+            linear2_params[0]
+        )
+
+        self.register_buffer(
+            "linear2_bias",
+            linear2_params[1]
+        )
 
 
-# =====================================================
-# LOAD QUANTIZED MODEL
-# =====================================================
+    def forward(self, x):
+
+        # Conv 1
+        x = F.conv2d(
+            x,
+            self.conv1_weight,
+            self.conv1_bias,
+            padding=1
+        )
+
+        x = F.relu(x)
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+
+        # Conv 2
+        x = F.conv2d(
+            x,
+            self.conv2_weight,
+            self.conv2_bias,
+            padding=1
+        )
+
+        x = F.relu(x)
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+
+        # Flatten
+        x = torch.flatten(x, 1)
+
+        # Linear 1
+        x = F.linear(
+            x,
+            self.linear1_weight.dequantize(),
+            self.linear1_bias
+        )
+
+        x = F.relu(x)
+
+        # Linear 2
+        x = F.linear(
+            x,
+            self.linear2_weight.dequantize(),
+            self.linear2_bias
+        )
+
+        return x
+
+
+# --------------------------------------------------
+# Load Model
+# --------------------------------------------------
 
 @st.cache_resource
 def load_model():
 
-    # Create original float model
-    model = SimpleCNN(num_classes=4)
+    device = torch.device("cpu")
 
-    # Convert Linear layers to dynamic quantized Linear
-    quantized_model = torch.quantization.quantize_dynamic(
-        model,
-        {nn.Linear},
-        dtype=torch.qint8
-    )
-
-    # Load saved quantized state_dict
-    checkpoint = torch.load(
+    state_dict = torch.load(
         "model.pth",
-        map_location="cpu",
+        map_location=device,
         weights_only=False
     )
 
-    # If checkpoint contains model_state_dict
-    if isinstance(checkpoint, dict):
+    model = CompatibleCNN(state_dict)
 
-        if "model_state_dict" in checkpoint:
+    model.to(device)
+    model.eval()
 
-            checkpoint = checkpoint["model_state_dict"]
-
-    # Remove DataParallel prefix if present
-    cleaned_checkpoint = {}
-
-    for key, value in checkpoint.items():
-
-        new_key = key
-
-        if new_key.startswith("module."):
-
-            new_key = new_key.replace(
-                "module.",
-                "",
-                1
-            )
-
-        cleaned_checkpoint[new_key] = value
-
-    # Load quantized weights
-    quantized_model.load_state_dict(
-        cleaned_checkpoint,
-        strict=True
-    )
-
-    quantized_model.eval()
-
-    return quantized_model
+    return model
 
 
-# =====================================================
-# IMAGE TRANSFORMATION
-# =====================================================
+model = load_model()
+
+
+# --------------------------------------------------
+# Image Preprocessing
+# --------------------------------------------------
 
 transform = transforms.Compose([
-
-    transforms.Resize(
-        (250, 250)
-    ),
-
+    transforms.Resize((250, 250)),
     transforms.ToTensor(),
-
     transforms.Normalize(
-        mean=[
-            0.485,
-            0.456,
-            0.406
-        ],
-
-        std=[
-            0.229,
-            0.224,
-            0.225
-        ]
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
     )
 ])
 
 
-# =====================================================
-# IMAGE UPLOAD
-# =====================================================
+# --------------------------------------------------
+# UI
+# --------------------------------------------------
 
-uploaded_file = st.file_uploader(
-    "Upload MRI Image",
-    type=[
-        "jpg",
-        "jpeg",
-        "png"
-    ]
+st.title("🧠 Brain Tumor Classifier")
+
+st.write(
+    "Upload a brain MRI image to classify the tumor category."
 )
 
 
-# =====================================================
-# PREDICTION
-# =====================================================
+uploaded_file = st.file_uploader(
+    "Upload MRI Image",
+    type=["jpg", "jpeg", "png"]
+)
+
+
+# --------------------------------------------------
+# Prediction
+# --------------------------------------------------
 
 if uploaded_file is not None:
 
-    image = Image.open(
-        uploaded_file
-    ).convert("RGB")
+    image = Image.open(uploaded_file).convert("RGB")
 
     st.image(
         image,
-        caption="Uploaded MRI Image",
-        width=400
+        caption="Uploaded MRI",
+        width="stretch"
     )
 
-    if st.button("Predict"):
+    st.write("")
 
-        try:
+    if st.button("🔍 Predict", type="primary"):
 
-            # Load model
-            model = load_model()
+        with st.spinner("Analyzing MRI image..."):
 
-            # Transform image
-            image_tensor = transform(image)
+            image_tensor = transform(image).unsqueeze(0)
 
-            # Add batch dimension
-            image_tensor = image_tensor.unsqueeze(0)
-
-            # CPU
-            image_tensor = image_tensor.to(device)
-
-            # Prediction
             with torch.no_grad():
 
-                output = model(
-                    image_tensor
-                )
+                output = model(image_tensor)
 
                 probabilities = torch.softmax(
                     output,
                     dim=1
-                )
+                )[0]
 
-                confidence, predicted_class = torch.max(
-                    probabilities,
-                    dim=1
-                )
+                predicted_index = torch.argmax(
+                    probabilities
+                ).item()
 
-            predicted_class = predicted_class.item()
+                predicted_class = class_names[
+                    predicted_index
+                ]
 
-            confidence = confidence.item()
+                confidence = probabilities[
+                    predicted_index
+                ].item() * 100
 
-            result = class_names[
-                predicted_class
-            ]
 
-            # Result
-            st.success(
-                "Prediction: "
-                + result.replace(
-                    "_",
-                    " "
-                ).title()
-            )
+        # --------------------------------------------------
+        # Result
+        # --------------------------------------------------
+
+        st.subheader("Prediction")
+
+        st.success(
+            f"Prediction: {predicted_class}"
+        )
+
+        st.metric(
+            "Confidence",
+            f"{confidence:.2f}%"
+        )
+
+
+        # --------------------------------------------------
+        # Probabilities
+        # --------------------------------------------------
+
+        st.subheader("Class Probabilities")
+
+        for i, class_name in enumerate(class_names):
+
+            probability = probabilities[i].item()
 
             st.write(
-                f"Confidence: "
-                f"{confidence * 100:.2f}%"
+                f"**{class_name}** — "
+                f"{probability * 100:.2f}%"
             )
 
-            # -----------------------------------------
-            # ALL CLASS PROBABILITIES
-            # -----------------------------------------
-
-            st.subheader(
-                "Class Probabilities"
-            )
-
-            for i, class_name in enumerate(
-                class_names
-            ):
-
-                probability = probabilities[
-                    0
-                ][i].item()
-
-                st.write(
-                    f"{class_name.replace('_', ' ').title()}: "
-                    f"{probability * 100:.2f}%"
-                )
-
-                st.progress(
-                    probability
-                )
-
-        except Exception as e:
-
-            st.error(
-                "Prediction failed."
-            )
-
-            st.exception(e)
+            st.progress(probability)
 
 
-# =====================================================
-# SIDEBAR
-# =====================================================
+# --------------------------------------------------
+# Sidebar
+# --------------------------------------------------
 
-st.sidebar.title(
-    "Model Information"
-)
+with st.sidebar:
 
-st.sidebar.write(
-    "Architecture: SimpleCNN"
-)
+    st.header("Model Information")
 
-st.sidebar.write(
-    "Quantization: Dynamic INT8"
-)
+    st.write("**Model:** SimpleCNN")
+    st.write("**Classes:** 4")
+    st.write("**Input Size:** 250 × 250")
+    st.write("**Inference:** CPU")
+    st.write("**Model Type:** Quantized CNN")
 
-st.sidebar.write(
-    "Input Size: 250 × 250"
-)
+    st.divider()
 
-st.sidebar.write(
-    "Classes: 4"
-)
-
-st.sidebar.write(
-    "Device: CPU"
-)
-
-st.sidebar.warning(
-    "This application is for educational "
-    "purposes only and is not a medical "
-    "diagnosis system."
-)
+    st.warning(
+        "This application is for educational and "
+        "research purposes only. It should not be "
+        "used as a medical diagnosis."
+    )
